@@ -5,31 +5,41 @@
 
 // Define number of motors (for this example we use 9)
 #define NUM_MOTORS 9
+#define C_SPOOL .026*3.1416 //Spool circumference (m)
 
 // Create a PCF8575 instance (I2C address 0x20)
 PCF8575 pcf8575(0x20);
 
 // Define PWM and encoder read pins for each motor
-uint8_t pwm_pins[NUM_MOTORS] = {19, 18, 17, 16, 2, 4, 13, 12, 23};  
+uint8_t pwm_pins[NUM_MOTORS] = {19, 18, 17, 16, 4, 2, 13, 12, 23};  
 uint8_t read_pins[NUM_MOTORS] = {36, 39, 34, 35, 32, 33, 25, 26, 27};
+
+//Define direction motor needs to go to tightent (0 is default, 1 is reverse)
+uint8_t motor_directions[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 double min_input = 255.0;
 double max_input = 3805.0;
+double offset_angle[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+double raw_angle[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+double filtered_pos[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+double unfiltered_pos[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+// MOTOR ORDER 0, 4, 5; 2, 8, 6; 1, 7, 3
+// This correlates with top, left, and right for each section
 
 // Define motor direction pins (two per motor) via PCF8575
 // For a 9-motor system we need 18 direction outputs.
 // Here we assume that the first 16 outputs are named P0..P15,
 // and then we use two additional pins (14, 15) for the last motor.
 uint8_t motor_direction_pins[NUM_MOTORS * 2] = {
-  P0, P1,  // Motor 0
+  P1, P0,  // Motor 0
   P2, P3,  // Motor 1
-  P4, P5,  // Motor 2
+  P5, P4,  // Motor 2
   P6, P7,  // Motor 3
-  P8, P9,  // Motor 4
+  P9, P8,  // Motor 4
   P10, P11, // Motor 5
-  P12, P13, // Motor 6
+  P13, P12, // Motor 6
   P14, P15, // Motor 7
-  14, 15    // Motor 8 (using additional pins)
+  15, 14    // Motor 8 (using additional pins)
 };
 
 // PID variables for each motor
@@ -50,7 +60,7 @@ const int pwmFreq = 500;
 const int pwmResolution = 8;
 
 // PID tuning parameters (adjust these per your system)
-const double Kp = 2.0, Ki = 0.0, Kd = 1.0;
+const double Kp = 5.0, Ki = 0.0005, Kd = 1.0;
 
 double readAngle(int motor);
 void updateRotation(int motor);
@@ -72,6 +82,8 @@ void setup() {
     ledcSetup(pwm_channels[i], pwmFreq, pwmResolution);
     ledcAttachPin(pwm_pins[i], pwm_channels[i]);
   }
+  pinMode(14, OUTPUT);
+  pinMode(15, OUTPUT);
   
   // Initialize PID controllers and set initial setpoints to the current measured positions.
   for (int i = 0; i < NUM_MOTORS; i++) {
@@ -80,12 +92,14 @@ void setup() {
     setpoint[i] = input[i];  // start at current position
     pid[i] = new PID(&input[i], &output[i], &setpoint[i], Kp, Ki, Kd, DIRECT);
     pid[i]->SetMode(AUTOMATIC);
-    pid[i]->SetOutputLimits(-255,255);
+    pid[i]->SetOutputLimits(-254,254);
   }
   
   // Initialize unwrapping variables for each motor
   for (int i = 0; i < NUM_MOTORS; i++) {
-    last_angle[i] = readAngle(i);
+    offset_angle[i] = readAngle(i);
+    last_angle[i] = offset_angle[i];
+    filtered_pos[i] = last_angle[i];
     rotations[i] = 0;
   }
   
@@ -132,11 +146,22 @@ void loop() {
             double sp = command.substring(sepIndex + 1).toFloat();
 
             if (motorIndex >= 0 && motorIndex < NUM_MOTORS) {
-                setpoint[motorIndex] = sp;
+              if (motor_directions[motorIndex] == 0){
+                setpoint[motorIndex] = sp * C_SPOOL / 360.0;
+              }
+              else {
+                setpoint[motorIndex] = -sp * C_SPOOL / 360.0;
+              }
                 Serial.print("Motor ");
                 Serial.print(motorIndex);
                 Serial.print(" new setpoint: ");
                 Serial.println(sp);
+            }
+            if (motorIndex == 10){
+              rotations[NUM_MOTORS] = {0};
+              for (int i = 0; i < NUM_MOTORS; i++) {
+                offset_angle[i] = raw_angle[i];
+              }
             }
         }
 
@@ -151,7 +176,9 @@ void loop() {
     updateRotation(i);
     
     // Calculate the absolute position (angle plus rotations)
-    input[i] = getAbsolutePosition(i);
+    unfiltered_pos[i] = getAbsolutePosition(i);
+    filtered_pos[i] = filtered_pos[i]*0.9 + unfiltered_pos[i]*0.1;
+    input[i] = filtered_pos[i];
     
     // Compute the PID control output for this motor
     pid[i]->Compute();
@@ -160,16 +187,19 @@ void loop() {
     driveMotor(i, output[i]);
     
     // Optionally print debug information
-    Serial.print("Motor ");
+    // Serial.print("Motor ");
     Serial.print(i);
-    Serial.print(" | Pos: ");
-    Serial.print(input[i]);
-    Serial.print(" | Set: ");
-    Serial.print(setpoint[i]);
-    Serial.print(" | Out: ");
-    Serial.println(output[i]);
+    Serial.print("P:");
+    Serial.print(int(input[i]));
+    Serial.print(" S");
+    Serial.print(int(setpoint[i]));
+    Serial.print(" O");
+    Serial.print(int(output[i]));
+    Serial.print(" ");
+
   }
-//   // UNCOMMENT WHEN READY TO USE NVM
+  Serial.print("       \r"); // Return to the beginning of the line
+    //   // UNCOMMENT WHEN READY TO USE NVM
 //   if (millis() >= lastSaveTime + 10000){
 //     nvmUpdate();
 //     lastSaveTime = millis();
@@ -180,27 +210,28 @@ void loop() {
 
 // Read the raw angle (0-360°) from the encoder for motor 'motor'
 double readAngle(int motor) {
+  double angle = 0;
   int raw = analogRead(read_pins[motor]);
-  double angle = doubleMap(double(raw), min_input, max_input, 0.0, 360.0);
+  angle = doubleMap(double(raw), min_input, max_input, 0.0, 360.0);
   return angle;
 }
 
 // Update the rotation count (unwrap the encoder reading) for motor 'motor'
 void updateRotation(int motor) {
-  double currentAngle = readAngle(motor);
-  double diff = currentAngle - last_angle[motor];
+  raw_angle[motor] = readAngle(motor);
+  double diff = raw_angle[motor] - last_angle[motor];
   // When the change is large (more than half a rotation) we assume a wrap-around.
   if (diff > 180) {
     rotations[motor]--;
   } else if (diff < -180) {
     rotations[motor]++;
   }
-  last_angle[motor] = currentAngle;
+  last_angle[motor] = raw_angle[motor];
 }
 
 // Get the absolute (unwrapped) position for motor 'motor'
 double getAbsolutePosition(int motor) {
-  return rotations[motor] * 360.0 + readAngle(motor);
+  return rotations[motor] * 360.0 + raw_angle[motor];
 }
 
 // Drive the motor for index 'motor' using the PID control output.
