@@ -12,10 +12,12 @@ PCF8575 pcf8575(0x20);
 
 // Define PWM and encoder read pins for each motor
 uint8_t pwm_pins[NUM_MOTORS] = {19, 18, 17, 16, 4, 2, 13, 12, 23};  
-uint8_t read_pins[NUM_MOTORS] = {36, 39, 34, 35, 32, 33, 25, 26, 27};
+uint8_t read_pins[NUM_MOTORS] = {36, 39, 34, 35, 27, 26, 25, 33, 32};
+
+
 
 //Define direction motor needs to go to tightent (0 is default, 1 is reverse)
-uint8_t motor_directions[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint8_t motor_directions[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 1, 1, 1};
 
 double min_input = 255.0;
 double max_input = 3805.0;
@@ -23,8 +25,8 @@ double offset_angle[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 double raw_angle[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 double filtered_pos[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 double unfiltered_pos[NUM_MOTORS] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-// MOTOR ORDER 0, 4, 5; 2, 8, 6; 1, 7, 3
-// This correlates with top, left, and right for each section
+// MOTOR ORDER 2, 3, 8; 0, 5, 4; 1, 6, 7
+// This correlates with left top, left bottom, and right for each section
 
 // Define motor direction pins (two per motor) via PCF8575
 // For a 9-motor system we need 18 direction outputs.
@@ -50,7 +52,7 @@ PID* pid[NUM_MOTORS];
 double last_angle[NUM_MOTORS];
 int rotations[NUM_MOTORS];
 
-// Create Preferences instance (for non-volatile storage if needed)
+// Create Preferences instance (for non-volatile storage if needed) 
 Preferences preferences;
 static unsigned long lastSaveTime = 0;
 
@@ -88,8 +90,9 @@ void setup() {
   // Initialize PID controllers and set initial setpoints to the current measured positions.
   for (int i = 0; i < NUM_MOTORS; i++) {
     // Read the initial raw angle for motor i (from its analog encoder output)
-    input[i] = readAngle(i);
-    setpoint[i] = input[i];  // start at current position
+    offset_angle[i] = readAngle(i);
+    input[i] = readAngle(i) - offset_angle[i];
+    setpoint[i] = 0; //input[i];  // start at current position
     pid[i] = new PID(&input[i], &output[i], &setpoint[i], Kp, Ki, Kd, DIRECT);
     pid[i]->SetMode(AUTOMATIC);
     pid[i]->SetOutputLimits(-254,254);
@@ -97,7 +100,6 @@ void setup() {
   
   // Initialize unwrapping variables for each motor
   for (int i = 0; i < NUM_MOTORS; i++) {
-    offset_angle[i] = readAngle(i);
     last_angle[i] = offset_angle[i];
     filtered_pos[i] = last_angle[i];
     rotations[i] = 0;
@@ -147,15 +149,15 @@ void loop() {
 
             if (motorIndex >= 0 && motorIndex < NUM_MOTORS) {
               if (motor_directions[motorIndex] == 0){
-                setpoint[motorIndex] = sp * C_SPOOL / 360.0;
+                setpoint[motorIndex] = sp; //* C_SPOOL / 360.0 - offset_angle[motorIndex];
               }
               else {
-                setpoint[motorIndex] = -sp * C_SPOOL / 360.0;
+                setpoint[motorIndex] = -sp; //* C_SPOOL / 360.0 + offset_angle[motorIndex];
               }
                 Serial.print("Motor ");
                 Serial.print(motorIndex);
                 Serial.print(" new setpoint: ");
-                Serial.println(sp);
+                Serial.println(setpoint[motorIndex]);
             }
             if (motorIndex == 10){
               rotations[NUM_MOTORS] = {0};
@@ -231,7 +233,7 @@ void updateRotation(int motor) {
 
 // Get the absolute (unwrapped) position for motor 'motor'
 double getAbsolutePosition(int motor) {
-  return rotations[motor] * 360.0 + raw_angle[motor];
+  return rotations[motor] * 360.0 + raw_angle[motor] - offset_angle[motor];
 }
 
 // Drive the motor for index 'motor' using the PID control output.
